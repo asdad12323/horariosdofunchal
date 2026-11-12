@@ -1,5 +1,6 @@
 // Autocarros do Funchal em tempo real — Cloudflare Pages (_worker.js). Serve /api/* e /tiles/* e deixa o resto para os ficheiros estáticos.
 const BASE = 'https://www.horariosdofunchal.pt/index.php?option=com_ajax&module=transporte&format=json&task=';
+const REF = ['51D', '805E']; // paragens de referência (sentido D / sentido S)
 const TZ = 'Atlantic/Madeira';
 const TILES = 'https://www.horariosdofunchal.pt/tiles/styles/basic-preview/512/';
 const UA = { 'user-agent': 'Mozilla/5.0', referer: 'https://www.horariosdofunchal.pt/' };
@@ -10,14 +11,14 @@ const pool = async (items, n, fn) => { const out = []; let i = 0;
   await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) { const k = i++; try { out[k] = await fn(items[k]); } catch { out[k] = null; } } }));
   return out; };
 
-async function api(task, params = {}, ttl = 0) {
+async function api(task, params = {}, ttl = 0, edge = ttl) {
   const url = BASE + task + Object.entries(params).map(([k, v]) => '&' + k + '=' + encodeURIComponent(v)).join('');
   const hit = cache.get(url);
   if (hit && Date.now() - hit.t < ttl) return hit.v;
-  const r = await fetch(url, { headers: { ...UA, accept: 'application/json' }, cf: ttl ? { cacheTtl: Math.round(ttl / 1000), cacheEverything: true } : undefined });
+  const r = await fetch(url, { headers: { ...UA, accept: 'application/json' }, cf: edge ? { cacheTtl: Math.round(edge / 1000), cacheEverything: true } : undefined });
   if (!r.ok) throw new Error(task + ' HTTP ' + r.status);
   let t = await r.text(); const i = t.indexOf('}{"success"'); if (i > 0) t = t.slice(0, i + 1); // a API devolve 2 JSONs colados
-  const v = JSON.parse(t).data; cache.set(url, { t: Date.now(), v }); return v;
+  const v = JSON.parse(t).data; if (ttl) { if (cache.size > 300) cache.clear(); cache.set(url, { t: Date.now(), v }); } return v;
 }
 
 const DAY = 6 * 3600e3;
@@ -45,13 +46,13 @@ const lineData = id => once('line:' + id + today(), async () => {
 });
 
 const timetable = (route, pat, sid) => once('tt:' + pat + sid, async () => {
-  const d = await api('getHorariosPercurso', { route_id: route, pattern_id: pat, time: '00:00:00', service_id: sid });
+  const d = await api('getHorariosPercurso', { route_id: route, pattern_id: pat, time: '00:00:00', service_id: sid }, 0, DAY);
   const m = {}; for (const t of d || []) m[t.trip_id] = t.horarios.map(h => [h.stop_id, sec(h.arrival_time)]); return m;
 });
 
 async function vehicles(ids) {
   const key = ids.join(','), hit = vcache.get(key), many = ids.length > 6;
-  if (hit && Date.now() - hit.t < (many ? 20000 : 8000)) return hit.v;
+  if (hit && Date.now() - hit.t < (many ? 15000 : 9000)) return hit.v;
   const ld = await Promise.all(ids.map(lineData)), jobs = [];
   for (const l of ld) for (const p of l.patterns) { const s = p.stops; if (!s.length) continue;
     for (const st of many ? [s[s.length - 1]] : [s[s.length - 1], s[s.length >> 1]]) jobs.push({ l, p, st }); }
@@ -62,6 +63,10 @@ async function vehicles(ids) {
     const k = x.vehicle_number + '|' + x.trip_id, prev = found.get(k);
     if (!prev || x.eta_seconds > prev.x.eta_seconds) found.set(k, { x, j: r.j }); // a paragem mais longe = destino
   }
+  // paragem de referência: só para autocarros que ainda lá vão passar
+  const refStops = new Map(); for (const l of ld) for (const p of l.patterns) for (const s of p.stops) if (REF.includes(String(s.num).toUpperCase())) refStops.set(s.id, s);
+  const refRows = new Map();
+  await pool([...refStops.keys()], 4, async id => { for (const x of ((await api('getTempoRealParagem', { stop_id: id }, 4000)) || {}).data || []) if (x.eta_seconds != null) refRows.set(x.vehicle_number + '|' + x.trip_id + '|' + id, x); });
   const now = localSec(), tn = Date.now(), out = [];
   for (const { x, j } of found.values()) {
     const p = j.p, tt = await timetable(p.route, p.id, j.l.sid).catch(() => ({})), sched = tt[x.trip_id] || [];
@@ -72,16 +77,17 @@ async function vehicles(ids) {
     else { const d = hav(v.lat, v.lon, lat, lon), dt = (tn - v.t) / 1000;
       if (d >= 8 || dt >= 30) { const s = Math.min(d / dt * 3.6, 110); v.speed = v.speed == null ? s : v.speed * .4 + s * .6; Object.assign(v, { lat, lon, t: tn }); } }
     // saída real: instante em que vimos o autocarro passar a 1ª paragem, recuado pelo tempo programado até lá
-    let ts = trips.get(x.trip_id); if (!ts) trips.set(x.trip_id, ts = { pass: {}, last: null });
+    let ts = trips.get(x.trip_id); if (!ts) { if (trips.size > 400) trips.delete(trips.keys().next().value); trips.set(x.trip_id, ts = { pass: {}, last: null }); }
     if (idx >= 0 && ts.last !== idx) { if (ts.last != null && idx > ts.last) ts.pass[idx] = now; ts.last = idx; }
     const dep0 = sched.length ? sched[0][1] : null, obs = Object.keys(ts.pass).map(Number).sort((a, b) => a - b)[0];
     let real = null, kind = null;
     if (obs != null && sched[obs] && dep0 != null) { real = ts.pass[obs] - (sched[obs][1] - dep0); kind = 'observada'; }
     else if (dep0 != null && x.delay_seconds != null) { real = dep0 + x.delay_seconds; kind = 'estimada'; }
     const ls = idx >= 0 ? p.stops[idx] : null;
+    const rs = p.stops.find((s, i) => i > idx && REF.includes(String(s.num).toUpperCase())), rr = rs && refRows.get(x.vehicle_number + '|' + x.trip_id + '|' + rs.id);
+    const ref = rr ? { num: rs.num, name: rs.name, eta: rr.eta_seconds, sched: rr.scheduled_time, display: rr.display_time } : null;
     out.push({ vehicle: x.vehicle_number, line: x.numero_novo, short: x.line_id, color: '#' + x.route_color, headsign: x.headsign, dir: x.direction_id,
-      lat, lon, speed: v.speed == null ? null : Math.round(v.speed), delay: x.delay_seconds, etaDest: x.eta_seconds, schedDest: x.scheduled_time,
-      displayDest: x.display_time, destName: j.st.name, destNum: j.st.num, last: ls && { num: ls.num, name: ls.name }, idx, total: p.stops.length,
+      lat, lon, speed: v.speed == null ? null : Math.round(v.speed), delay: x.delay_seconds, ref, last: ls && { num: ls.num, name: ls.name }, idx, total: p.stops.length,
       depSched: dep0 == null ? null : hms(dep0), depReal: real == null ? null : hms(real), depKind: kind });
   }
   const v = { at: hms(now), vehicles: out.sort((a, b) => a.short.localeCompare(b.short, 'pt', { numeric: true }) || a.vehicle - b.vehicle) };
