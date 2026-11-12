@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Autocarros do Funchal em direto</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<aside>
+  <header><h1>Autocarros do Funchal</h1><div id="st">A carregar…</div></header>
+  <input id="q" type="search" placeholder="Filtrar linhas (ex.: 04, Amparo)" aria-label="Filtrar linhas">
+  <div id="chips"></div>
+  <div id="list"><div class="empty">Escolhe uma ou mais linhas para ver os autocarros e as paragens.</div></div>
+</aside>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>window.API_BASE=''; // URL do servidor Node quando o front-end estiver noutro domínio, ex.: 'https://api.o-teu-site.pt'</script>
+<script src="app.js"></script>
+</body>
+</html>
