@@ -14,7 +14,7 @@ map.on('locationerror',e=>toast(e.code===1?'Localização bloqueada: permite o a
 function toast(t){let d=$('#toast');if(!d){d=document.createElement('div');d.id='toast';d.className='toast';document.body.append(d)}d.textContent=t;d.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>d.hidden=true,5000)}
 map.createPane('buses').style.zIndex=660; // acima das etiquetas das paragens (650), abaixo dos popups (700)
 const G={shapes:L.layerGroup().addTo(map),stops:L.layerGroup().addTo(map),buses:L.layerGroup().addTo(map)};
-let lines=[],sel=new Set(store('sel')||['04']),stopMarks=[],busMarks=new Map(),vehicles=[],fitted=false;
+let lines=[],sel=new Set(store('sel')||['01','02','04']),stopMarks=[],busMarks=new Map(),vehicles=[],fitted=false;
 
 // ---- linhas
 function chips(){const f=$('#q').value.toLowerCase();
